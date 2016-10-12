@@ -2,5 +2,4 @@
 
 require 'rake'
 load File.expand_path(File.join(__dir__, '../Rakefile'))
-
 Rake::Task['vendor:cbench:run'].invoke(ARGV)
