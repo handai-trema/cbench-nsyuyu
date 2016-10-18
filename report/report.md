@@ -19,40 +19,89 @@ ruby-profを用いて，Cbenchプログラムのプロファイリングを行�
   1.52      1.680     1.680     0.000     0.000    98290   BinData::BasePrimitive#initialize_instance
   1.52      6.028     1.671     0.000     4.357    81839   Kernel#dup
 ```
+上記の結果から，Kernelモジュールのメソッドやバイナリデータを扱うBinDataクラスのメソッドの実行時間が
+長いことがわかる．
+現状のCbenchコントローラのプログラムでは，CbenchプロセスがPacketInする度に，
+FlowModメッセージを一から作り直している．
+FlowModメッセージの作成には，バイナリデータを容易に扱うために，BinDataクラスのメソッドを
+利用していると考えられ，この部分の処理が遅く，Cbenchのボトルネックとなっている．
 
-
-## 課題3
-### 課題内容
-HelloTrema が起動したら次のメッセージを表示するようにしてみよう:
-
-```
-HelloTrema started.
-```
-
-ただし、次の回答ではダメ (なぜダメか？も考察しよう)
-
+## 発展課題内容(Cbenchの高速化)
+Cbenchのボトルネックを改善し，高速化せよ．
+## 解答
+Cbenchプロセスが送信するPacket Inの内容はすべて同じものであるため，
+PacketInする度に，FlowModメッセージを作り直す必要はなく，
+一度目のPacketInで，生成したFlowModメッセージをキャッシュし，二度目以降の
+PacketInに対しては，キャッシュしたFlowModメッセージを送信すればよい．
+このように，プログラムを書き換えることで，Cbenchプログラムのボトルネックとなっていた
+BinDataクラスのメソッドの呼び出し回数が減り，ボトルネックが改善され，
+プログラムの高速化が期待できる．
+キャッシュを利用し，高速化を図ったプログラム(lib/fast_cbench.rb)を以下に記す．
+なお，以下のプログラムは，文献[1]を参考に作成した．
 ```ruby
-class HelloTrema < Trema::Controller
-  def start(_args)
-    logger.info 'HelloTrema started.'
-  end
-  ...
-```
-
-### 解答
-self.classによって，カレントオブジェクトのクラス(Classクラス)を取得することができる．
-また，Classクラスの親クラスであるModuleクラスのnameメソッドを用いて，
-クラス名を文字列で取得することができる．
-つまり，self.class.nameで，自クラス名を取得することができる．
-また，元のソースコードでは，文字列がシングルクォーテーションで囲まれているが，
-このままでは，文字列に埋め込まれた式を展開することができないため，
-式を含んだ文字列を表示する場合は，文字列をダブルクォーテーションで囲む必要がある．
-これらを考慮して，hello_trema.rbのHelloTremaクラス内のstart関数の中身を以下の内容に変更し，
-課題を解決した．
-```ruby
-class HelloTrema < Trema::Controller
+class FastCbench < Trema::Controller
   def start(_args)
     logger.info "#{self.class.name} started."
   end
-  ...
+
+  def packet_in(dpid, packet_in)
+    @flow_mod ||= create_flow_mod_binary(packet_in)
+    send_message dpid,@flow_mod
+  end
+
+  private
+
+  def create_flow_mod_binary(packet_in)
+    options = {
+      command: :add,
+      priority: 0,
+      transaction_id: 0,
+      idle_timeout: 0,
+      hard_timeout: 0,
+      buffer_id: packet_in.buffer_id,
+      match: ExactMatch.new(packet_in),
+      actions: SendOutPort.new(packet_in.in_port + 1)
+    }
+    FlowMod.new(options).to_binary.tap do |flow_mod| 
+      def flow_mod.to_binary
+        self
+      end
+    end
+  end
+end
 ```
+高速化前のCbenchプログラムのベンチマークの結果を以下に示す．
+```
+1   switches: fmods/sec:  49   total = 0.004876 per ms 
+1   switches: fmods/sec:  15   total = 0.001438 per ms 
+1   switches: fmods/sec:  30   total = 0.002857 per ms 
+1   switches: fmods/sec:  14   total = 0.001337 per ms 
+1   switches: fmods/sec:  20   total = 0.001939 per ms 
+1   switches: fmods/sec:  11   total = 0.001008 per ms 
+1   switches: fmods/sec:  18   total = 0.001748 per ms 
+1   switches: fmods/sec:  23   total = 0.002286 per ms 
+1   switches: fmods/sec:  15   total = 0.001459 per ms 
+1   switches: fmods/sec:  14   total = 0.001330 per ms 
+RESULT: 1 switches 9 tests min/max/avg/stdev = 1.01/2.86/1.71/0.54 responses/s
+```
+高速化後のCbenchプログラムのベンチマークの結果を以下に示す．
+```
+1   switches: fmods/sec:  282   total = 0.028167 per ms 
+1   switches: fmods/sec:  170   total = 0.016958 per ms 
+1   switches: fmods/sec:  200   total = 0.019817 per ms 
+1   switches: fmods/sec:  130   total = 0.012910 per ms 
+1   switches: fmods/sec:  137   total = 0.013619 per ms 
+1   switches: fmods/sec:  176   total = 0.017585 per ms 
+1   switches: fmods/sec:  291   total = 0.029099 per ms 
+1   switches: fmods/sec:  216   total = 0.021453 per ms 
+1   switches: fmods/sec:  181   total = 0.018049 per ms 
+1   switches: fmods/sec:  153   total = 0.015242 per ms 
+RESULT: 1 switches 9 tests min/max/avg/stdev = 12.91/29.10/18.30/4.61 responses/s
+```
+以上の結果より，高速前のプログラムでは，1秒間に打てるFlowModの数が，平均20.9回であったのに
+対して，高速化後のプログラムでは，平均193.6回となっており，高速化が実現されたことを
+確認した．
+
+
+##参考文献
+[1]:高宮 安仁，鈴木 一哉，松井 暢之，村木 暢哉，山崎 泰宏，[TremaでOpenFlowプログラミング](http://yasuhito.github.io/trema-book/)
